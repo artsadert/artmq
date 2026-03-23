@@ -39,17 +39,35 @@
 ---
 
 ## 🧱 Архитектура
+```mermaid
+graph TB
+    subgraph Clients
+        Pub[Publisher]
+        Sub1[Subscriber 1]
+        Sub2[Subscriber 2]
+    end
 
-artmq построен на модульной архитектуре:
+    subgraph "artmq Broker"
+        Transport[Transport Layer<br/>REST / WebSocket / gRPC]
+        Core[Core Engine<br/>Topics & Queues<br/>Message Routing]
+        Storage[Storage Layer<br/>File / SQL / NoSQL]
+        Cluster[Cluster Manager<br/>Raft]
+        Metrics[Prometheus Metrics]
+        Auth[Authentication & Authorization]
+        WebUI[Web UI]
+    end
 
-- **Transport Layer** — REST API + WebSocket для реального времени (поддерживается также gRPC).
-- **Core Engine** — управление топиками, очередями, маршрутизация сообщений.
-- **Storage Layer** — плагинная система хранения (файловая система / SQL / NoSQL).
-- **Cluster Manager** — координация узлов (Raft).
-- **Metrics & Auth** — встроенные модули мониторинга и безопасности.
-
-Архитектурная схема представлена в файле `ARCHITECTURE.md`.
-
+    Pub -- "publish message" --> Transport
+    Transport -- "authenticate (API key)" --> Auth
+    Transport -- "route to topic/queue" --> Core
+    Core -- "persist message" --> Storage
+    Core -- "notify subscribers" --> Transport
+    Transport -- "deliver message" --> Sub1
+    Transport -- "deliver message" --> Sub2
+    Core -- "replicate to cluster" --> Cluster
+    Core -- "expose metrics" --> Metrics
+    WebUI -- "view queues/metrics" --> Core
+```
 ---
 
 ## 🚀 Быстрый старт
