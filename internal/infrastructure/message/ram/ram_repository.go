@@ -3,12 +3,10 @@ package ram
 import (
 	"container/heap"
 	"fmt"
-	"math"
 	"sync"
 	"time"
 
 	"github.com/artsadert/artmq/internal/domain/entities/message"
-	"github.com/artsadert/artmq/internal/domain/repo"
 	"github.com/artsadert/artmq/internal/domain/value_object/priority_queue"
 )
 
@@ -17,7 +15,7 @@ type RamRepository struct {
 	queues map[string]*priority_queue.PriorityQueue
 }
 
-func NewRamRepository() repo.MessageRepo {
+func NewRamRepository() *RamRepository {
 	return &RamRepository{
 		queues: make(map[string]*priority_queue.PriorityQueue),
 	}
@@ -34,10 +32,7 @@ func (r *RamRepository) getOrCreateQueue(topic string) *priority_queue.PriorityQ
 }
 
 func getPriority(msg *message.Message) int {
-	if msg.Exp == nil {
-		return math.MaxInt64
-	}
-	return int(*msg.Exp)
+	return msg.Priority
 }
 
 func isExpired(msg *message.Message) bool {

@@ -8,9 +8,10 @@ import (
 	"github.com/artsadert/artmq/internal/domain/entities/message"
 )
 
-func newMsg(topic string, exp *int64) *message.Message {
+func newMsg(topic string, exp *int64, priority int) *message.Message {
 	msg, _ := message.NewMessage(topic)
 	msg.Exp = exp
+	msg.Priority = priority
 	return msg
 }
 
@@ -18,16 +19,15 @@ func TestPushAndPullMessage_Order(t *testing.T) {
 	repo := NewRamRepository()
 
 	now := time.Now().Unix()
-	exp1 := now + 10
-	exp2 := now + 5
+	exp1 := now + 5
+	exp2 := now + 10
 
-	msg1 := newMsg("topic1", &exp1)
-	msg2 := newMsg("topic1", &exp2)
+	msg1 := newMsg("topic1", &exp1, 2)
+	msg2 := newMsg("topic1", &exp2, 1)
 
 	_ = repo.PushMessage(msg1)
 	_ = repo.PushMessage(msg2)
 
-	// msg2 should come first (smaller exp)
 	first, err := repo.PullMessage("topic1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -48,8 +48,8 @@ func TestSkipExpiredMessages(t *testing.T) {
 	past := time.Now().Unix() - 10
 	future := time.Now().Unix() + 10
 
-	expired := newMsg("topic1", &past)
-	valid := newMsg("topic1", &future)
+	expired := newMsg("topic1", &past, 1)
+	valid := newMsg("topic1", &future, 1)
 
 	_ = repo.PushMessage(expired)
 	_ = repo.PushMessage(valid)
@@ -68,7 +68,7 @@ func TestPeekMessage(t *testing.T) {
 	repo := NewRamRepository()
 
 	future := time.Now().Unix() + 10
-	msg := newMsg("topic1", &future)
+	msg := newMsg("topic1", &future, 1)
 
 	_ = repo.PushMessage(msg)
 
@@ -94,8 +94,8 @@ func TestPeekSkipsExpired(t *testing.T) {
 	past := time.Now().Unix() - 10
 	future := time.Now().Unix() + 10
 
-	expired := newMsg("topic1", &past)
-	valid := newMsg("topic1", &future)
+	expired := newMsg("topic1", &past, 1)
+	valid := newMsg("topic1", &future, 1)
 
 	_ = repo.PushMessage(expired)
 	_ = repo.PushMessage(valid)
@@ -119,7 +119,7 @@ func TestIsEmpty(t *testing.T) {
 	}
 
 	future := time.Now().Unix() + 10
-	msg := newMsg("topic1", &future)
+	msg := newMsg("topic1", &future, 1)
 
 	_ = repo.PushMessage(msg)
 
@@ -134,8 +134,8 @@ func TestMultiTopicIsolation(t *testing.T) {
 
 	future := time.Now().Unix() + 10
 
-	msg1 := newMsg("topic1", &future)
-	msg2 := newMsg("topic2", &future)
+	msg1 := newMsg("topic1", &future, 1)
+	msg2 := newMsg("topic2", &future, 1)
 
 	_ = repo.PushMessage(msg1)
 	_ = repo.PushMessage(msg2)
@@ -171,7 +171,7 @@ func TestConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			msg := newMsg("topic1", &future)
+			msg := newMsg("topic1", &future, 1)
 			_ = repo.PushMessage(msg)
 		}()
 	}

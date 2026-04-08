@@ -10,7 +10,7 @@ type Message struct {
 	Id        uuid.UUID
 	TopicName string
 	Exp       *int64
-	Priority  int64
+	Priority  int
 }
 
 func NewMessage(topicName string) (*Message, error) {
