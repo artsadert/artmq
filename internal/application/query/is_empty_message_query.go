@@ -1,13 +1,9 @@
-package command
-
-import (
-	"github.com/artsadert/artmq/internal/application/common"
-)
+package query
 
 type IsEmptyMessageQuery struct {
 	TopicName string `json:"topicName"`
 }
 
 type IsEmptyMessageQueryResult struct {
-	Result *common.MessageResult
+	IsEmpty bool
 }

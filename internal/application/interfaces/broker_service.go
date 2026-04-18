@@ -2,6 +2,7 @@ package interfaces
 
 import (
 	"github.com/artsadert/artmq/internal/application/command"
+	"github.com/artsadert/artmq/internal/application/query"
 )
 
 type BrokerService interface {
@@ -9,5 +10,5 @@ type BrokerService interface {
 	PeekMessage(*command.PeekMessageCommand) *command.PeekMessageCommandResult
 	PullMessage(*command.PullMessageCommand) *command.PullMessageCommandResult
 
-	IsEmpty(*query.IsEmptyQuery) *query.IsEmptyQueryResult
+	IsEmpty(*query.IsEmptyMessageQuery) *query.IsEmptyMessageQueryResult
 }
