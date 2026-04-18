@@ -22,7 +22,7 @@ func NewMessageService(repo repo.MessageRepo) *MessageService {
 }
 
 func (s *MessageService) PushMessage(cmd *command.PushMessageCommand) *command.PushMessageCommandResult {
-	msg, err := message.NewMessage(cmd.TopicName)
+	msg, err := message.NewMessage(cmd.TopicName, cmd.Payload)
 	if err != nil {
 		return &command.PushMessageCommandResult{
 			Result: mappers.ToMessageResult(nil, err),

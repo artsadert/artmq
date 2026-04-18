@@ -9,11 +9,12 @@ import (
 type Message struct {
 	Id        uuid.UUID
 	TopicName string
+	Payload   []byte
 	Exp       *int64
 	Priority  int
 }
 
-func NewMessage(topicName string) (*Message, error) {
+func NewMessage(topicName string, payload []byte) (*Message, error) {
 	if topicName == "" {
 		return nil, fmt.Errorf("topicName is required")
 	}
@@ -21,6 +22,7 @@ func NewMessage(topicName string) (*Message, error) {
 	return &Message{
 		Id:        uuid.New(),
 		TopicName: topicName,
+		Payload:   payload,
 		Exp:       nil,
 		Priority:  0,
 	}, nil

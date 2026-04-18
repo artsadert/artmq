@@ -7,6 +7,7 @@ import (
 type PushMessageCommand struct {
 	TopicName string `json:"topicName"`
 	TTL       *int64 `json:"ttl,omitempty"`
+	Payload   []byte `json:"payload"`
 	Priority  *int64 `json:"priority,omitempty"`
 }
 

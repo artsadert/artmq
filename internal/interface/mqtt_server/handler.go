@@ -5,11 +5,20 @@ import (
 	"net"
 	"net/http"
 
+	"github.com/artsadert/artmq/internal/application/services"
 	"github.com/artsadert/artmq/internal/interface/mqtt_server/server"
 )
 
 type Handler struct {
-	Port string
+	msgService *services.MessageService
+	Port       string
+}
+
+func NewHandler(msgService *services.MessageService, port string) *Handler {
+	return &Handler{
+		msgService: msgService,
+		Port:       port,
+	}
 }
 
 func HealthHandler(w http.ResponseWriter, r *http.Request) {
@@ -17,10 +26,7 @@ func HealthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ListenAndServe() error {
-	broker := &server.Broker{
-		Clients:       make(map[string]*server.Client),
-		Subscriptions: make(map[string][]*server.Client),
-	}
+	broker := server.NewBroker(h.msgService)
 
 	listener, err := net.Listen("tcp", h.Port)
 	if err != nil {
