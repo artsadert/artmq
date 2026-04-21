@@ -35,6 +35,10 @@ func (h *Handler) ListenAndServe() error {
 
 	defer listener.Close()
 	log.Println("mqtt 5.0 broker started on :1883")
+	go func() {
+		broker.StartDispatcher()
+	}()
+
 	for {
 		conn, err := listener.Accept()
 		if err != nil {

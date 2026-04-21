@@ -58,6 +58,7 @@ func (s *MessageService) PeekMessage(cmd *command.PeekMessageCommand) *command.P
 func (s *MessageService) PullMessage(cmd *command.PullMessageCommand) *command.PullMessageCommandResult {
 	msg, err := s.repo.PullMessage(cmd.TopicName)
 
+	// log.Println(msg, "pull")
 	return &command.PullMessageCommandResult{
 		Result: mappers.ToMessageResult(msg, err),
 	}

@@ -11,7 +11,9 @@ type Broker struct {
 	Clients       map[string]*Client
 	Subscriptions map[string][]*Client // topicFilter -> []*Client
 	msgService    *services.MessageService
-	mu            sync.RWMutex
+
+	mu       sync.RWMutex
+	notifyCh chan string
 }
 
 func NewBroker(msgService *services.MessageService) *Broker {
@@ -19,6 +21,8 @@ func NewBroker(msgService *services.MessageService) *Broker {
 		Clients:       make(map[string]*Client),
 		Subscriptions: make(map[string][]*Client),
 		msgService:    msgService,
-		mu:            sync.RWMutex{},
+
+		mu:       sync.RWMutex{},
+		notifyCh: make(chan string, 100),
 	}
 }

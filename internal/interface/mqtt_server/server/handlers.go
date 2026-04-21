@@ -4,9 +4,12 @@ import (
 	"bufio"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"strings"
+
+	"github.com/artsadert/artmq/internal/application/command"
 )
 
 func (b *Broker) handleCONNECT(c *Client, payload []byte) error {
@@ -198,6 +201,11 @@ func (b *Broker) handleSUBSCRIBE(c *Client, payload []byte) error {
 		}
 		if !already {
 			b.Subscriptions[filter] = append(b.Subscriptions[filter], c)
+			select {
+			case b.notifyCh <- filter:
+			default:
+				// не блокируем если канал заполнен
+			}
 		}
 	}
 
@@ -208,44 +216,43 @@ func (b *Broker) handleSUBSCRIBE(c *Client, payload []byte) error {
 
 // handlePUBLISH обрабатывает PUBLISH (только QoS 0)
 func (b *Broker) handlePUBLISH(c *Client, flags byte, payload []byte) error {
-	// Определяем, есть ли retained, QoS
 	retained := (flags & 0x01) != 0
 	qos := (flags >> 1) & 0x03
-	// Для простоты поддерживаем только QoS 0
+
 	if qos != 0 {
-		// можно отправить DISCONNECT с причиной QoSNotSupported
 		return errors.New("qos not supported")
 	}
 	if retained {
-		// игнорируем
+		// пока игнорируем retained
 	}
 
 	r := bufio.NewReader(strings.NewReader(string(payload)))
+
 	topic, err := readUTF8String(r)
 	if err != nil {
 		return err
 	}
-	// Пропускаем packetID если qos>0, но у нас qos=0, поэтому нет packetID
-	// Оставшиеся данные - это message payload
-	message, err := io.ReadAll(r)
+
+	payloadBytes, err := io.ReadAll(r)
 	if err != nil {
 		return err
 	}
 
-	// Рассылаем всем подписанным клиентам (включая отправителя? по спецификации - нет, но для простоты можно исключить)
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	for filter, subscribers := range b.Subscriptions {
-		if matchTopic(filter, topic) {
-			for _, subscriber := range subscribers {
-				if subscriber == c {
-					continue // не отправляем обратно отправителю
-				}
-				// Формируем PUBLISH пакет для подписчика
-				b.sendPublish(subscriber, topic, message, qos, retained)
-			}
-		}
+	res := b.msgService.PushMessage(&command.PushMessageCommand{
+		TopicName: topic,
+		Payload:   payloadBytes,
+	})
+
+	if res.Result.Error != "" {
+		return fmt.Errorf("failed to push message: %v", res.Result.Error)
 	}
+
+	select {
+	case b.notifyCh <- topic:
+	default:
+		// не блокируем если канал заполнен
+	}
+
 	return nil
 }
 
