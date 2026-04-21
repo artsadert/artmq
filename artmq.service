@@ -1,0 +1,11 @@
+[Unit]
+Description=ArtMQ Broker
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/artmq
+Restart=always
+User=nobody
+
+[Install]
+WantedBy=multi-user.target
