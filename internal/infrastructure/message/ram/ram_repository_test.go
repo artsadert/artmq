@@ -9,7 +9,7 @@ import (
 )
 
 func newMsg(topic string, exp *int64, priority int) *message.Message {
-	msg, _ := message.NewMessage(topic)
+	msg, _ := message.NewMessage(topic, nil)
 	msg.Exp = exp
 	msg.Priority = priority
 	return msg
@@ -157,6 +157,69 @@ func TestPullEmpty(t *testing.T) {
 	_, err := repo.PullMessage("topic1")
 	if err == nil {
 		t.Errorf("expected error on empty pull")
+	}
+}
+
+func TestPushNilMessage(t *testing.T) {
+	repo := NewRamRepository()
+	err := repo.PushMessage(nil)
+	if err == nil {
+		t.Error("expected error when pushing nil message")
+	}
+}
+
+func TestPushEmptyTopic(t *testing.T) {
+	repo := NewRamRepository()
+	msg, _ := message.NewMessage("topic", nil)
+	msg.TopicName = ""
+	err := repo.PushMessage(msg)
+	if err == nil {
+		t.Error("expected error when pushing message with empty topic")
+	}
+}
+
+func TestPeekEmpty(t *testing.T) {
+	repo := NewRamRepository()
+	_, err := repo.PeekMessage("nonexistent")
+	if err == nil {
+		t.Error("expected error peeking from empty topic")
+	}
+}
+
+func TestAllExpiredOnPull(t *testing.T) {
+	repo := NewRamRepository()
+	past := time.Now().Unix() - 10
+	_ = repo.PushMessage(newMsg("topic1", &past, 1))
+	_ = repo.PushMessage(newMsg("topic1", &past, 2))
+
+	_, err := repo.PullMessage("topic1")
+	if err == nil {
+		t.Error("expected error when all messages are expired")
+	}
+}
+
+func TestAllExpiredOnPeek(t *testing.T) {
+	repo := NewRamRepository()
+	past := time.Now().Unix() - 10
+	_ = repo.PushMessage(newMsg("topic1", &past, 1))
+
+	_, err := repo.PeekMessage("topic1")
+	if err == nil {
+		t.Error("expected error when all messages are expired on peek")
+	}
+}
+
+func TestNoExpiry(t *testing.T) {
+	repo := NewRamRepository()
+	msg := newMsg("topic1", nil, 1) // nil exp = never expires
+
+	_ = repo.PushMessage(msg)
+	pulled, err := repo.PullMessage("topic1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pulled.Id != msg.Id {
+		t.Error("wrong message")
 	}
 }
 
