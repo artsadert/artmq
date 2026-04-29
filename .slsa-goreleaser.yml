@@ -24,4 +24,3 @@ flags:
 ldflags:
   - "-s -w"
   - "-X main.version={{ .Tag }}"
-  - "-X main.commit={{ .Sha }}"
