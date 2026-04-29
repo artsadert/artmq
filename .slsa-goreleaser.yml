@@ -1,0 +1,27 @@
+version: 1
+
+# Binary name. Template vars come from the SLSA builder.
+binary: artmq-{{ .Os }}-{{ .Arch }}
+
+# Entrypoint package (directory, not file).
+main: ./cmd/artmq
+
+# Build from repo root.
+dir: ./
+
+# Target platform(s). The builder runs one workflow per (goos, goarch).
+# To produce more than one, duplicate the workflow file or use a matrix.
+goos: linux
+goarch: amd64
+
+env:
+  - CGO_ENABLED=0
+  - GO111MODULE=on
+
+flags:
+  - -trimpath
+
+ldflags:
+  - "-s -w"
+  - "-X main.version={{ .Tag }}"
+  - "-X main.commit={{ .Sha }}"
