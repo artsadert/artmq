@@ -6,12 +6,17 @@ import (
 	"github.com/google/uuid"
 )
 
+const DefaultMaxAttempts = 5
+
 type Message struct {
-	Id        uuid.UUID
-	TopicName string
-	Payload   []byte
-	Exp       *int64
-	Priority  int
+	Id          uuid.UUID
+	TopicName   string
+	Payload     []byte
+	Exp         *int64
+	Priority    int
+	Qos         byte
+	Attempts    int
+	MaxAttempts int
 }
 
 func NewMessage(topicName string, payload []byte) (*Message, error) {
@@ -20,10 +25,18 @@ func NewMessage(topicName string, payload []byte) (*Message, error) {
 	}
 
 	return &Message{
-		Id:        uuid.New(),
-		TopicName: topicName,
-		Payload:   payload,
-		Exp:       nil,
-		Priority:  0,
+		Id:          uuid.New(),
+		TopicName:   topicName,
+		Payload:     payload,
+		Exp:         nil,
+		Priority:    0,
+		Qos:         0,
+		Attempts:    0,
+		MaxAttempts: DefaultMaxAttempts,
 	}, nil
+}
+
+// DLQTopic returns the dead-letter topic name for the given origin topic.
+func DLQTopic(origin string) string {
+	return "$dlq/" + origin
 }

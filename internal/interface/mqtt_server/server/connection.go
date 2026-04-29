@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"log"
@@ -10,13 +9,10 @@ import (
 
 func (b *Broker) HandleConnection(conn net.Conn) error {
 	defer conn.Close()
-	c := &Client{
-		conn:   conn,
-		reader: bufio.NewReader(conn),
-		writer: bufio.NewWriter(conn),
-	}
+	c := newClient(conn)
+	defer b.handleConnectionLoss(c)
+
 	for {
-		// we dont use remaining so it is just _
 		packetType, flags, _, payload, err := readPacket(c.reader)
 		if err != nil {
 			if err == io.EOF {
@@ -40,7 +36,26 @@ func (b *Broker) HandleConnection(conn net.Conn) error {
 		case PUBLISH:
 			err = b.handlePUBLISH(c, flags, payload)
 			if err != nil {
-				// Можно отправить DISCONNECT
+				return err
+			}
+		case PUBACK:
+			err = b.handlePUBACK(c, payload)
+			if err != nil {
+				return err
+			}
+		case PUBREC:
+			err = b.handlePUBREC(c, payload)
+			if err != nil {
+				return err
+			}
+		case PUBREL:
+			err = b.handlePUBREL(c, payload)
+			if err != nil {
+				return err
+			}
+		case PUBCOMP:
+			err = b.handlePUBCOMP(c, payload)
+			if err != nil {
 				return err
 			}
 		case PINGREQ:

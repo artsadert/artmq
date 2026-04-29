@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/artsadert/artmq/internal/application/command"
+	"github.com/artsadert/artmq/internal/domain/entities/message"
 )
 
 func (b *Broker) handleCONNECT(c *Client, payload []byte) error {
@@ -37,7 +38,21 @@ func (b *Broker) handleCONNECT(c *Client, payload []byte) error {
 		b.sendCONNACK(c, MalformedPacket)
 		return err
 	}
-	_ = keepalive // можно хранить для PING
+	_ = keepalive
+
+	// MQTT 5: variable header has a Properties section between Keep Alive and
+	// the payload. We don't use any of the properties yet, so skip them.
+	propLen, err := decodeVariableByteInteger(r)
+	if err != nil {
+		b.sendCONNACK(c, MalformedPacket)
+		return err
+	}
+	if propLen > 0 {
+		if _, err := io.CopyN(io.Discard, r, int64(propLen)); err != nil {
+			b.sendCONNACK(c, MalformedPacket)
+			return err
+		}
+	}
 
 	clientID, err := readUTF8String(r)
 	if err != nil {
@@ -45,69 +60,54 @@ func (b *Broker) handleCONNECT(c *Client, payload []byte) error {
 		return err
 	}
 
-	// Если clientID пустой и CleanStart=0 -> ошибка (для простоты требуем непустой)
-	if clientID == "" && cleanStart {
+	// Empty client ID is allowed only with cleanStart=1; otherwise spec mandates
+	// rejection. We assign a random ID in either case to avoid collisions.
+	if clientID == "" {
 		clientID = generateRandomID()
-		// b.sendCONNACK(c, ClientIdentifierNotValid)
 	}
 	c.id = clientID
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	// Проверяем, не занят ли ID
 	if _, exists := b.Clients[clientID]; exists {
-		// закрываем старого клиента
 		old := b.Clients[clientID]
 		old.conn.Close()
 		delete(b.Clients, clientID)
-		// также удаляем подписки старого клиента (можно пройтись по Subscriptions)
-		for topic, subs := range b.Subscriptions {
-			newSubs := []*Client{}
-			for _, subClient := range subs {
-				if subClient != old {
-					newSubs = append(newSubs, subClient)
-				}
-			}
-			if len(newSubs) == 0 {
-				delete(b.Subscriptions, topic)
-			} else {
-				b.Subscriptions[topic] = newSubs
-			}
-		}
+		b.removeClientSubsLocked(old)
 	}
 
 	c.id = clientID
 	b.Clients[clientID] = c
 
 	if cleanStart {
-		// удаляем старые подписки этого клиента (если есть)
-		for topic, subs := range b.Subscriptions {
-			newSubs := []*Client{}
-			for _, subClient := range subs {
-				if subClient != c {
-					newSubs = append(newSubs, subClient)
-				}
-			}
-			if len(newSubs) == 0 {
-				delete(b.Subscriptions, topic)
-			} else {
-				b.Subscriptions[topic] = newSubs
-			}
-		}
+		b.removeClientSubsLocked(c)
 	}
 
-	// Отправляем CONNACK с успехом
 	b.sendCONNACK(c, Success)
 	return nil
 }
 
+// removeClientSubsLocked drops every subscription owned by c. Caller holds b.mu.
+func (b *Broker) removeClientSubsLocked(c *Client) {
+	for topic, subs := range b.Subscriptions {
+		newSubs := subs[:0:0]
+		for _, sub := range subs {
+			if sub.Client != c {
+				newSubs = append(newSubs, sub)
+			}
+		}
+		if len(newSubs) == 0 {
+			delete(b.Subscriptions, topic)
+		} else {
+			b.Subscriptions[topic] = newSubs
+		}
+	}
+}
+
 func (b *Broker) sendCONNACK(c *Client, reasonCode byte) error {
-	// CONNACK fixed header: тип 2, флаги 0, remaining length 2 (property length 0 + reason code)
-	// В MQTT 5.0 есть properties, для простоты property length = 0
-	remaining := 2 // reason code (1) + property length (1, значение 0)
+	remaining := 2
 	buf := []byte{byte(CONNACK << 4), byte(remaining)}
-	// variable header: property length (0), reason code
-	buf = append(buf, reasonCode, 0x00) // 0x00 = property length = 0
+	buf = append(buf, reasonCode, 0x00)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	_, err := c.conn.Write(buf)
@@ -115,20 +115,15 @@ func (b *Broker) sendCONNACK(c *Client, reasonCode byte) error {
 }
 
 func (b *Broker) sendSUBACK(c *Client, packetID uint16, reasonCodes []byte) {
-	// Build variable header: packetID (2 bytes) + property length (1 byte = 0)
 	varHeader := make([]byte, 0, 2+1)
 	varHeader = append(varHeader, byte(packetID>>8), byte(packetID&0xFF))
-	varHeader = append(varHeader, 0x00) // property length = 0 (encoded as single byte 0x00)
+	varHeader = append(varHeader, 0x00)
 
-	// Full payload = varHeader + reasonCodes
 	fullPayload := append(varHeader, reasonCodes...)
 
-	// Encode remaining length
-	remainingLen := len(fullPayload)
-	remBytes := encodeVarint(remainingLen)
+	remBytes := encodeVarint(len(fullPayload))
 
-	// Build full packet
-	packet := []byte{byte(SUBACK << 4)} // 0x90
+	packet := []byte{byte(SUBACK << 4)}
 	packet = append(packet, remBytes...)
 	packet = append(packet, fullPayload...)
 
@@ -145,26 +140,22 @@ func (b *Broker) handleSUBSCRIBE(c *Client, payload []byte) error {
 	}
 	r := bufio.NewReader(strings.NewReader(string(payload)))
 
-	// 1. Read packet identifier
 	var packetID uint16
 	if err := binary.Read(r, binary.BigEndian, &packetID); err != nil {
 		return err
 	}
 
-	// 2. Read property length (variable byte integer)
 	propLen, err := decodeVariableByteInteger(r)
 	if err != nil {
 		return err
 	}
 
-	// 3. Skip properties (we ignore them for simplicity)
 	if propLen > 0 {
 		if _, err := io.CopyN(io.Discard, r, int64(propLen)); err != nil {
 			return err
 		}
 	}
 
-	// 4. Now read topic filters and options
 	var filters []string
 	var qosLevels []byte
 
@@ -180,51 +171,50 @@ func (b *Broker) handleSUBSCRIBE(c *Client, payload []byte) error {
 		if err != nil {
 			return err
 		}
-		qos := options & 0x03 // lower two bits
+		qos := options & 0x03
+		if qos > 2 {
+			qos = 2
+		}
 		filters = append(filters, filter)
 		qosLevels = append(qosLevels, qos)
 	}
 
-	// Store subscriptions (same as before)
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	for _, filter := range filters {
-		if _, exists := b.Subscriptions[filter]; !exists {
-			b.Subscriptions[filter] = []*Client{}
-		}
-		already := false
-		for _, cl := range b.Subscriptions[filter] {
-			if cl == c {
-				already = true
+	for i, filter := range filters {
+		qos := qosLevels[i]
+		subs := b.Subscriptions[filter]
+		replaced := false
+		for j, existing := range subs {
+			if existing.Client == c {
+				subs[j].QoS = qos
+				replaced = true
 				break
 			}
 		}
-		if !already {
-			b.Subscriptions[filter] = append(b.Subscriptions[filter], c)
-			select {
-			case b.notifyCh <- filter:
-			default:
-				// не блокируем если канал заполнен
-			}
+		if !replaced {
+			subs = append(subs, Subscription{Client: c, QoS: qos})
+		}
+		b.Subscriptions[filter] = subs
+
+		select {
+		case b.notifyCh <- filter:
+		default:
 		}
 	}
+	b.mu.Unlock()
 
-	// Send SUBACK
 	b.sendSUBACK(c, packetID, qosLevels)
 	return nil
 }
 
-// handlePUBLISH обрабатывает PUBLISH (только QoS 0)
+// handlePUBLISH processes incoming PUBLISH at QoS 0/1/2.
 func (b *Broker) handlePUBLISH(c *Client, flags byte, payload []byte) error {
 	retained := (flags & 0x01) != 0
 	qos := (flags >> 1) & 0x03
-
-	if qos != 0 {
-		return errors.New("qos not supported")
+	if qos > 2 {
+		return errors.New("malformed PUBLISH: qos>2")
 	}
-	if retained {
-		// пока игнорируем retained
-	}
+	_ = retained
 
 	r := bufio.NewReader(strings.NewReader(string(payload)))
 
@@ -233,9 +223,42 @@ func (b *Broker) handlePUBLISH(c *Client, flags byte, payload []byte) error {
 		return err
 	}
 
+	var packetID uint16
+	if qos > 0 {
+		if err := binary.Read(r, binary.BigEndian, &packetID); err != nil {
+			return err
+		}
+	}
+
+	// MQTT 5 properties section
+	propLen, err := decodeVariableByteInteger(r)
+	if err != nil {
+		return err
+	}
+	if propLen > 0 {
+		if _, err := io.CopyN(io.Discard, r, int64(propLen)); err != nil {
+			return err
+		}
+	}
+
 	payloadBytes, err := io.ReadAll(r)
 	if err != nil {
 		return err
+	}
+
+	// QoS 2: if we already saw this packet ID and replied PUBREC, do not redeliver
+	// to the topic — just resend PUBREC.
+	if qos == 2 {
+		c.stateMu.Lock()
+		_, dup := c.incomingQoS2[packetID]
+		if !dup {
+			c.incomingQoS2[packetID] = true
+		}
+		c.stateMu.Unlock()
+		if dup {
+			b.sendPUBREC(c, packetID)
+			return nil
+		}
 	}
 
 	res := b.msgService.PushMessage(&command.PushMessageCommand{
@@ -246,77 +269,201 @@ func (b *Broker) handlePUBLISH(c *Client, flags byte, payload []byte) error {
 	if res.Result.Error != "" {
 		return fmt.Errorf("failed to push message: %v", res.Result.Error)
 	}
+	if res.Result.Message != nil {
+		res.Result.Message.Qos = qos
+	}
+
+	switch qos {
+	case 1:
+		b.sendPUBACK(c, packetID)
+	case 2:
+		b.sendPUBREC(c, packetID)
+	}
 
 	select {
 	case b.notifyCh <- topic:
 	default:
-		// не блокируем если канал заполнен
 	}
 
 	return nil
 }
 
-func (b *Broker) sendPublish(c *Client, topic string, message []byte, qos byte, retained bool) {
-	// Формируем PUBLISH: fixed header (type=3, flags: qos<<1, retain)
+func (b *Broker) handlePUBACK(c *Client, payload []byte) error {
+	if len(payload) < 2 {
+		return errors.New("malformed PUBACK")
+	}
+	packetID := uint16(payload[0])<<8 | uint16(payload[1])
+	if entry := c.takeInflight(packetID); entry != nil {
+		_ = entry
+	}
+	return nil
+}
+
+func (b *Broker) handlePUBREC(c *Client, payload []byte) error {
+	if len(payload) < 2 {
+		return errors.New("malformed PUBREC")
+	}
+	packetID := uint16(payload[0])<<8 | uint16(payload[1])
+	if !c.updateInflight(packetID, awaitingPubComp) {
+		return nil
+	}
+	b.sendPUBREL(c, packetID)
+	return nil
+}
+
+func (b *Broker) handlePUBREL(c *Client, payload []byte) error {
+	if len(payload) < 2 {
+		return errors.New("malformed PUBREL")
+	}
+	packetID := uint16(payload[0])<<8 | uint16(payload[1])
+	c.stateMu.Lock()
+	delete(c.incomingQoS2, packetID)
+	c.stateMu.Unlock()
+	b.sendPUBCOMP(c, packetID)
+	return nil
+}
+
+func (b *Broker) handlePUBCOMP(c *Client, payload []byte) error {
+	if len(payload) < 2 {
+		return errors.New("malformed PUBCOMP")
+	}
+	packetID := uint16(payload[0])<<8 | uint16(payload[1])
+	if entry := c.takeInflight(packetID); entry != nil {
+		_ = entry
+	}
+	return nil
+}
+
+// sendPublish sends a PUBLISH packet to the subscriber. For qos>=1 the caller is
+// responsible for tracking the inflight entry (typically via Client.allocatePacketID).
+func (b *Broker) sendPublish(c *Client, topic string, msgPayload []byte, qos byte, packetID uint16, retained bool) {
 	flagsByte := byte(PUBLISH << 4)
 	if retained {
 		flagsByte |= 0x01
 	}
 	flagsByte |= (qos << 1) & 0x06
-	// variable header: topic name (UTF8)
+
 	var varHeader []byte
 	varHeader = append(varHeader, byte(len(topic)>>8), byte(len(topic)&0xFF))
 	varHeader = append(varHeader, []byte(topic)...)
-	// если qos >0, добавляем packetID (2 байта), но у нас qos=0
-	// остальное - payload
-	fullPayload := append(varHeader, message...)
-	remaining := len(fullPayload)
-	// encode remaining length
-	remBuf := []byte{}
-	rem := remaining
-	for {
-		digit := byte(rem % 128)
-		rem /= 128
-		if rem > 0 {
-			digit |= 0x80
-		}
-		remBuf = append(remBuf, digit)
-		if rem == 0 {
-			break
-		}
+
+	if qos > 0 {
+		varHeader = append(varHeader, byte(packetID>>8), byte(packetID&0xFF))
 	}
+
+	// MQTT 5 properties: empty section (length 0).
+	varHeader = append(varHeader, 0x00)
+
+	fullPayload := append(varHeader, msgPayload...)
+	remBuf := encodeVarint(len(fullPayload))
+
 	packet := append([]byte{flagsByte}, remBuf...)
 	packet = append(packet, fullPayload...)
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.conn.Write(packet)
+	if _, err := c.conn.Write(packet); err != nil {
+		log.Printf("Failed to send PUBLISH to %s: %v", c.id, err)
+	}
 }
 
-// handlePINGREQ
+func (b *Broker) sendAckPacket(c *Client, packetType byte, packetID uint16) {
+	// MQTT 5 PUBACK/PUBREC/PUBREL/PUBCOMP: packetID(2) + reasonCode(1) + propLen(1)
+	flags := byte(0)
+	if packetType == PUBREL {
+		flags = 0x02 // PUBREL has reserved bits 0010
+	}
+	first := (packetType << 4) | flags
+
+	body := []byte{
+		byte(packetID >> 8), byte(packetID & 0xFF),
+		0x00, // reason code = success
+		0x00, // property length = 0
+	}
+	packet := append([]byte{first, byte(len(body))}, body...)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, err := c.conn.Write(packet); err != nil {
+		log.Printf("Failed to send ack type %d to %s: %v", packetType, c.id, err)
+	}
+}
+
+func (b *Broker) sendPUBACK(c *Client, packetID uint16) {
+	b.sendAckPacket(c, PUBACK, packetID)
+}
+
+func (b *Broker) sendPUBREC(c *Client, packetID uint16) {
+	b.sendAckPacket(c, PUBREC, packetID)
+}
+
+func (b *Broker) sendPUBREL(c *Client, packetID uint16) {
+	b.sendAckPacket(c, PUBREL, packetID)
+}
+
+func (b *Broker) sendPUBCOMP(c *Client, packetID uint16) {
+	b.sendAckPacket(c, PUBCOMP, packetID)
+}
+
 func (b *Broker) handlePINGREQ(c *Client) error {
-	// PINGRESP: fixed header тип 13, флаги 0, remaining length 0
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	_, err := c.conn.Write([]byte{byte(PINGRESP << 4), 0x00})
 	return err
 }
 
-// handleDISCONNECT
+// handleDISCONNECT performs a clean disconnect: drops subscriptions and closes conn.
+// In-flight cleanup is handled by handleConnectionLoss in the read loop's defer.
 func (b *Broker) handleDISCONNECT(c *Client) {
-	// Закрываем соединение, удаляем клиента и его подписки
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	delete(b.Clients, c.id)
-	for topic, subs := range b.Subscriptions {
-		newSubs := []*Client{}
-		for _, sub := range subs {
-			if sub != c {
-				newSubs = append(newSubs, sub)
-			}
-		}
-		if len(newSubs) == 0 {
-			delete(b.Subscriptions, topic)
-		} else {
-			b.Subscriptions[topic] = newSubs
-		}
-	}
+	b.removeClientSubsLocked(c)
+	b.mu.Unlock()
 	c.conn.Close()
+}
+
+// handleConnectionLoss runs whenever the connection ends (clean or abrupt).
+// It requeues in-flight QoS>=1 messages, escalating to DLQ if MaxAttempts exceeded.
+func (b *Broker) handleConnectionLoss(c *Client) {
+	if c.id != "" {
+		b.mu.Lock()
+		if b.Clients[c.id] == c {
+			delete(b.Clients, c.id)
+		}
+		b.removeClientSubsLocked(c)
+		b.mu.Unlock()
+	}
+
+	for _, entry := range c.drainInflight() {
+		b.requeueOrDLQ(entry)
+	}
+}
+
+func (b *Broker) requeueOrDLQ(entry *inflightMessage) {
+	if entry == nil || entry.msg == nil {
+		return
+	}
+	msg := entry.msg
+	msg.Attempts++
+
+	maxAttempts := msg.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = message.DefaultMaxAttempts
+	}
+
+	if msg.Attempts >= maxAttempts {
+		if err := b.msgService.DeadLetter(entry.origTopic, msg); err != nil {
+			log.Printf("DLQ push failed for topic %s: %v", entry.origTopic, err)
+		}
+		return
+	}
+
+	if err := b.msgService.Requeue(msg); err != nil {
+		log.Printf("requeue failed for topic %s: %v", entry.origTopic, err)
+		return
+	}
+	select {
+	case b.notifyCh <- entry.origTopic:
+	default:
+	}
 }

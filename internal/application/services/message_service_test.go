@@ -10,19 +10,29 @@ import (
 )
 
 type mockRepo struct {
-	pushErr  error
-	pullMsg  *message.Message
-	pullErr  error
-	peekMsg  *message.Message
-	peekErr  error
-	empty    bool
-	emptyErr error
+	pushErr   error
+	pullMsg   *message.Message
+	pullErr   error
+	peekMsg   *message.Message
+	peekErr   error
+	empty     bool
+	emptyErr  error
+	dlqErr    error
+	dlqCalls  int
+	lastDLQOf string
+	lastDLQ   *message.Message
 }
 
-func (m *mockRepo) PushMessage(_ *message.Message) error                { return m.pushErr }
-func (m *mockRepo) PullMessage(_ string) (*message.Message, error)      { return m.pullMsg, m.pullErr }
-func (m *mockRepo) PeekMessage(_ string) (*message.Message, error)      { return m.peekMsg, m.peekErr }
-func (m *mockRepo) IsEmpty(_ string) (bool, error)                      { return m.empty, m.emptyErr }
+func (m *mockRepo) PushMessage(_ *message.Message) error           { return m.pushErr }
+func (m *mockRepo) PullMessage(_ string) (*message.Message, error) { return m.pullMsg, m.pullErr }
+func (m *mockRepo) PeekMessage(_ string) (*message.Message, error) { return m.peekMsg, m.peekErr }
+func (m *mockRepo) IsEmpty(_ string) (bool, error)                 { return m.empty, m.emptyErr }
+func (m *mockRepo) PushToDLQ(orig string, msg *message.Message) error {
+	m.dlqCalls++
+	m.lastDLQOf = orig
+	m.lastDLQ = msg
+	return m.dlqErr
+}
 
 func TestPushMessage_Success(t *testing.T) {
 	svc := NewMessageService(&mockRepo{})
@@ -136,5 +146,57 @@ func TestIsEmpty_ErrorDefaultsToTrue(t *testing.T) {
 	result := svc.IsEmpty(&query.IsEmptyMessageQuery{TopicName: "topic"})
 	if !result.IsEmpty {
 		t.Error("expected IsEmpty=true when repo returns error")
+	}
+}
+
+func TestDeadLetter_Routes(t *testing.T) {
+	repo := &mockRepo{}
+	svc := NewMessageService(repo)
+
+	msg, _ := message.NewMessage("topic", []byte("x"))
+	if err := svc.DeadLetter("topic", msg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.dlqCalls != 1 {
+		t.Errorf("expected 1 DLQ call, got %d", repo.dlqCalls)
+	}
+	if repo.lastDLQOf != "topic" {
+		t.Errorf("expected origTopic 'topic', got %q", repo.lastDLQOf)
+	}
+	if repo.lastDLQ.Id != msg.Id {
+		t.Error("DLQ pushed wrong message")
+	}
+}
+
+func TestDeadLetter_NilRejected(t *testing.T) {
+	svc := NewMessageService(&mockRepo{})
+	if err := svc.DeadLetter("topic", nil); err == nil {
+		t.Error("expected error on nil message")
+	}
+}
+
+func TestRequeue_PushesViaRepo(t *testing.T) {
+	repo := &mockRepo{}
+	svc := NewMessageService(repo)
+
+	msg, _ := message.NewMessage("topic", nil)
+	msg.Attempts = 2
+	if err := svc.Requeue(msg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRequeue_PropagatesRepoError(t *testing.T) {
+	svc := NewMessageService(&mockRepo{pushErr: errors.New("disk full")})
+	msg, _ := message.NewMessage("topic", nil)
+	if err := svc.Requeue(msg); err == nil {
+		t.Error("expected error from repo to propagate")
+	}
+}
+
+func TestRequeue_NilRejected(t *testing.T) {
+	svc := NewMessageService(&mockRepo{})
+	if err := svc.Requeue(nil); err == nil {
+		t.Error("expected error on nil message")
 	}
 }

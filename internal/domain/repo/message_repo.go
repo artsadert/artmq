@@ -8,4 +8,8 @@ type MessageRepo interface {
 	PeekMessage(topicName string) (*message.Message, error)
 
 	IsEmpty(topicName string) (bool, error)
+
+	// PushToDLQ writes the message into the dead-letter topic for origTopic.
+	// The message's TopicName is rewritten to the DLQ topic.
+	PushToDLQ(origTopic string, msg *message.Message) error
 }

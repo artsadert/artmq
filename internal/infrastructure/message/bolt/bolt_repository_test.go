@@ -210,6 +210,66 @@ func TestBolt_IsEmpty_AfterPull(t *testing.T) {
 	}
 }
 
+func TestBolt_PushToDLQ(t *testing.T) {
+	repo, cleanup := newBoltRepo(t)
+	defer cleanup()
+
+	msg, _ := message.NewMessage("topic1", []byte("dead"))
+	if err := repo.PushToDLQ("topic1", msg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	pulled, err := repo.PullMessage(message.DLQTopic("topic1"))
+	if err != nil {
+		t.Fatalf("expected DLQ message, got error: %v", err)
+	}
+	if pulled.TopicName != message.DLQTopic("topic1") {
+		t.Errorf("expected DLQ topic, got %q", pulled.TopicName)
+	}
+	if pulled.Id != msg.Id {
+		t.Error("DLQ message ID mismatch")
+	}
+}
+
+func TestBolt_ExpiredRoutedToDLQ(t *testing.T) {
+	repo, cleanup := newBoltRepo(t)
+	defer cleanup()
+
+	past := time.Now().Unix() - 10
+	future := time.Now().Unix() + 60
+
+	expired := boltMsg("topic1", []byte("e"), 1, &past)
+	valid := boltMsg("topic1", []byte("v"), 2, &future)
+
+	_ = repo.PushMessage(expired)
+	_ = repo.PushMessage(valid)
+
+	pulled, err := repo.PullMessage("topic1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pulled.Id != valid.Id {
+		t.Error("expected non-expired message")
+	}
+
+	dlqMsg, err := repo.PullMessage(message.DLQTopic("topic1"))
+	if err != nil {
+		t.Fatalf("expected expired message in DLQ: %v", err)
+	}
+	if dlqMsg.Id != expired.Id {
+		t.Error("DLQ should contain the expired message")
+	}
+}
+
+func TestBolt_PushToDLQNil(t *testing.T) {
+	repo, cleanup := newBoltRepo(t)
+	defer cleanup()
+
+	if err := repo.PushToDLQ("topic", nil); err == nil {
+		t.Error("expected error on nil message")
+	}
+}
+
 func TestBolt_MultiTopicIsolation(t *testing.T) {
 	repo, cleanup := newBoltRepo(t)
 	defer cleanup()

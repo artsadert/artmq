@@ -23,6 +23,13 @@ func NewBoltRepository(path string) (*BoltRepository, error) {
 }
 
 func (r *BoltRepository) PushMessage(msg *message.Message) error {
+	if msg == nil {
+		return fmt.Errorf("message is nil")
+	}
+	if msg.TopicName == "" {
+		return fmt.Errorf("topic is required")
+	}
+
 	return r.db.Update(func(tx *bbolt.Tx) error {
 		bucket, err := tx.CreateBucketIfNotExists([]byte(msg.TopicName))
 		if err != nil {
@@ -34,7 +41,6 @@ func (r *BoltRepository) PushMessage(msg *message.Message) error {
 			return err
 		}
 
-		// key = message ID (or timestamp fallback)
 		key := []byte(msg.Id.String())
 
 		return bucket.Put(key, data)
@@ -56,7 +62,6 @@ func (r *BoltRepository) PeekMessage(topic string) (*message.Message, error) {
 				return nil
 			}
 
-			// skip expired
 			if msg.Exp != nil && time.Now().Unix() > *msg.Exp {
 				return nil
 			}
@@ -81,6 +86,7 @@ func (r *BoltRepository) PeekMessage(topic string) (*message.Message, error) {
 
 func (r *BoltRepository) PullMessage(topic string) (*message.Message, error) {
 	var selected *message.Message
+	var expiredMessages []*message.Message
 
 	err := r.db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(topic))
@@ -89,6 +95,7 @@ func (r *BoltRepository) PullMessage(topic string) (*message.Message, error) {
 		}
 
 		var bestKey []byte
+		var expiredKeys [][]byte
 
 		err := b.ForEach(func(k, v []byte) error {
 			var msg message.Message
@@ -97,7 +104,11 @@ func (r *BoltRepository) PullMessage(topic string) (*message.Message, error) {
 			}
 
 			if msg.Exp != nil && time.Now().Unix() > *msg.Exp {
-				_ = b.Delete(k)
+				kCopy := make([]byte, len(k))
+				copy(kCopy, k)
+				expiredKeys = append(expiredKeys, kCopy)
+				expiredCopy := msg
+				expiredMessages = append(expiredMessages, &expiredCopy)
 				return nil
 			}
 
@@ -112,12 +123,26 @@ func (r *BoltRepository) PullMessage(topic string) (*message.Message, error) {
 			return err
 		}
 
+		for _, k := range expiredKeys {
+			_ = b.Delete(k)
+		}
+
 		if bestKey == nil {
 			return fmt.Errorf("no valid messages")
 		}
 
 		return b.Delete(bestKey)
 	})
+
+	// Route expired messages to DLQ in a separate transaction so a DLQ write
+	// failure does not roll back the pull.
+	for _, em := range expiredMessages {
+		if dlqErr := r.PushToDLQ(topic, em); dlqErr != nil {
+			// best-effort: do not block primary pull on DLQ failure
+			_ = dlqErr
+		}
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -145,4 +170,29 @@ func (r *BoltRepository) IsEmpty(topic string) (bool, error) {
 	}
 
 	return empty, nil
+}
+
+func (r *BoltRepository) PushToDLQ(origTopic string, msg *message.Message) error {
+	if msg == nil {
+		return fmt.Errorf("message is nil")
+	}
+
+	dlqTopic := message.DLQTopic(origTopic)
+	dlqMsg := *msg
+	dlqMsg.TopicName = dlqTopic
+	dlqMsg.Exp = nil // dead-lettered messages do not expire
+
+	return r.db.Update(func(tx *bbolt.Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists([]byte(dlqTopic))
+		if err != nil {
+			return err
+		}
+
+		data, err := json.Marshal(&dlqMsg)
+		if err != nil {
+			return err
+		}
+
+		return bucket.Put([]byte(dlqMsg.Id.String()), data)
+	})
 }

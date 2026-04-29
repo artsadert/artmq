@@ -1,6 +1,7 @@
 package services
 
 import (
+	"fmt"
 	"log"
 	"time"
 
@@ -29,12 +30,10 @@ func (s *MessageService) PushMessage(cmd *command.PushMessageCommand) *command.P
 		}
 	}
 
-	// apply priority
 	if cmd.Priority != nil {
 		msg.Priority = int(*cmd.Priority)
 	}
 
-	// apply TTL
 	if cmd.TTL != nil {
 		exp := time.Now().Unix() + *cmd.TTL
 		msg.Exp = &exp
@@ -58,7 +57,6 @@ func (s *MessageService) PeekMessage(cmd *command.PeekMessageCommand) *command.P
 func (s *MessageService) PullMessage(cmd *command.PullMessageCommand) *command.PullMessageCommandResult {
 	msg, err := s.repo.PullMessage(cmd.TopicName)
 
-	// log.Println(msg, "pull")
 	return &command.PullMessageCommandResult{
 		Result: mappers.ToMessageResult(msg, err),
 	}
@@ -73,9 +71,25 @@ func (s *MessageService) IsEmpty(q *query.IsEmptyMessageQuery) *query.IsEmptyMes
 		}
 	}
 
-	result := &query.IsEmptyMessageQueryResult{
+	return &query.IsEmptyMessageQueryResult{
 		IsEmpty: empty,
 	}
+}
 
-	return result
+// Requeue puts an existing message (e.g. one that failed delivery) back onto
+// its origin topic queue, preserving Attempts/MaxAttempts/Qos.
+func (s *MessageService) Requeue(msg *message.Message) error {
+	if msg == nil {
+		return fmt.Errorf("message is nil")
+	}
+	return s.repo.PushMessage(msg)
+}
+
+// DeadLetter routes a message that exhausted its delivery attempts to the DLQ
+// for origTopic.
+func (s *MessageService) DeadLetter(origTopic string, msg *message.Message) error {
+	if msg == nil {
+		return fmt.Errorf("message is nil")
+	}
+	return s.repo.PushToDLQ(origTopic, msg)
 }

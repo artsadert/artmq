@@ -223,6 +223,63 @@ func TestNoExpiry(t *testing.T) {
 	}
 }
 
+func TestRam_PushToDLQ(t *testing.T) {
+	repo := NewRamRepository()
+
+	msg, _ := message.NewMessage("topic1", []byte("dead"))
+	if err := repo.PushToDLQ("topic1", msg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	pulled, err := repo.PullMessage(message.DLQTopic("topic1"))
+	if err != nil {
+		t.Fatalf("expected DLQ message, got error: %v", err)
+	}
+	if pulled.TopicName != message.DLQTopic("topic1") {
+		t.Errorf("expected topic %q, got %q", message.DLQTopic("topic1"), pulled.TopicName)
+	}
+	if pulled.Id != msg.Id {
+		t.Error("DLQ message ID mismatch")
+	}
+}
+
+func TestRam_ExpiredMessageRoutedToDLQ(t *testing.T) {
+	repo := NewRamRepository()
+
+	past := time.Now().Unix() - 10
+	future := time.Now().Unix() + 60
+
+	expired := newMsg("topic1", &past, 1)
+	valid := newMsg("topic1", &future, 1)
+
+	_ = repo.PushMessage(expired)
+	_ = repo.PushMessage(valid)
+
+	pulled, err := repo.PullMessage("topic1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pulled.Id != valid.Id {
+		t.Errorf("expected non-expired message back from pull")
+	}
+
+	// expired message should now live in DLQ
+	dlq, err := repo.PullMessage(message.DLQTopic("topic1"))
+	if err != nil {
+		t.Fatalf("expected expired message in DLQ, got error: %v", err)
+	}
+	if dlq.Id != expired.Id {
+		t.Error("DLQ should contain the expired message")
+	}
+}
+
+func TestRam_PushToDLQNil(t *testing.T) {
+	repo := NewRamRepository()
+	if err := repo.PushToDLQ("topic", nil); err == nil {
+		t.Error("expected error pushing nil to DLQ")
+	}
+}
+
 func TestConcurrentAccess(t *testing.T) {
 	repo := NewRamRepository()
 	wg := sync.WaitGroup{}

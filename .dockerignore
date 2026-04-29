@@ -2,3 +2,11 @@ PKGBUILD
 README.md
 storage/
 .git/
+artmq-*.tar.zst
+/src
+/pkg
+/artmq
+artmq.service
+PKGBUILD
+.github/
+.slsa-goreleaser.yml

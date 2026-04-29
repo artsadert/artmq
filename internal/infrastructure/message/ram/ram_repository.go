@@ -63,14 +63,16 @@ func (r *RamRepository) PushMessage(msg *message.Message) error {
 
 func (r *RamRepository) PullMessage(topicName string) (*message.Message, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	q, ok := r.queues[topicName]
 	if !ok || q.Len() == 0 {
+		r.mu.Unlock()
 		return nil, fmt.Errorf("no messages in topic")
 	}
 
-	// skip expired messages
+	var expired []*message.Message
+	var selected *message.Message
+
 	for q.Len() > 0 {
 		item := heap.Pop(q).(*priority_queue.Item)
 
@@ -80,13 +82,24 @@ func (r *RamRepository) PullMessage(topicName string) (*message.Message, error) 
 		}
 
 		if isExpired(msg) {
+			expired = append(expired, msg)
 			continue
 		}
 
-		return msg, nil
+		selected = msg
+		break
+	}
+	r.mu.Unlock()
+
+	for _, em := range expired {
+		_ = r.PushToDLQ(topicName, em)
 	}
 
-	return nil, fmt.Errorf("no non-expired messages")
+	if selected == nil {
+		return nil, fmt.Errorf("no non-expired messages")
+	}
+
+	return selected, nil
 }
 
 func (r *RamRepository) PeekMessage(topicName string) (*message.Message, error) {
@@ -98,9 +111,8 @@ func (r *RamRepository) PeekMessage(topicName string) (*message.Message, error) 
 		return nil, fmt.Errorf("no messages in topic")
 	}
 
-	// we may need to clean expired ones from the top
 	for q.Len() > 0 {
-		item := (*q)[0] // peek root
+		item := (*q)[0]
 
 		msg, ok := item.Value().(*message.Message)
 		if !ok {
@@ -129,4 +141,22 @@ func (r *RamRepository) IsEmpty(topicName string) (bool, error) {
 	}
 
 	return q.Len() == 0, nil
+}
+
+func (r *RamRepository) PushToDLQ(origTopic string, msg *message.Message) error {
+	if msg == nil {
+		return fmt.Errorf("message is nil")
+	}
+
+	dlqTopic := message.DLQTopic(origTopic)
+	dlqMsg := *msg
+	dlqMsg.TopicName = dlqTopic
+	dlqMsg.Exp = nil // dead-lettered messages do not expire
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	q := r.getOrCreateQueue(dlqTopic)
+	item := priority_queue.NewItem(&dlqMsg, getPriority(&dlqMsg))
+	heap.Push(q, item)
+	return nil
 }
