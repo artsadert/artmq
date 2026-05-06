@@ -1,6 +1,8 @@
 package server
 
 import (
+	"math/rand/v2"
+
 	"github.com/artsadert/artmq/internal/application/command"
 	"github.com/artsadert/artmq/internal/domain/entities/message"
 )
@@ -17,10 +19,39 @@ func (b *Broker) StartDispatcher() {
 func (b *Broker) dispatchTopic(topic string) {
 	for {
 		b.mu.RLock()
-		subs := append([]Subscription(nil), b.Subscriptions[topic]...)
+		// Bucket matching subscriptions by routing kind:
+		//   - regular (broadcast): every sub gets a copy, deduped per-client
+		//     across overlapping filters with max QoS.
+		//   - shared (MQTT 5): one sub per (group, filter) bucket gets the
+		//     message; members compete.
+		type groupKey struct{ group, filter string }
+		seen := make(map[*Client]int)
+		var regular []Subscription
+		groups := make(map[groupKey][]Subscription)
+
+		for filter, filterSubs := range b.Subscriptions {
+			if !matchTopic(filter, topic) {
+				continue
+			}
+			for _, s := range filterSubs {
+				if s.Group != "" {
+					k := groupKey{s.Group, filter}
+					groups[k] = append(groups[k], s)
+					continue
+				}
+				if idx, ok := seen[s.Client]; ok {
+					if s.QoS > regular[idx].QoS {
+						regular[idx].QoS = s.QoS
+					}
+					continue
+				}
+				seen[s.Client] = len(regular)
+				regular = append(regular, s)
+			}
+		}
 		b.mu.RUnlock()
 
-		if len(subs) == 0 {
+		if len(regular) == 0 && len(groups) == 0 {
 			return
 		}
 
@@ -33,7 +64,13 @@ func (b *Broker) dispatchTopic(topic string) {
 		}
 
 		msg := res.Result.Message
-		b.deliverToSubscribers(topic, msg, subs)
+		if len(regular) > 0 {
+			b.deliverToSubscribers(topic, msg, regular)
+		}
+		for _, members := range groups {
+			pick := members[rand.IntN(len(members))]
+			b.deliverToSubscribers(topic, msg, []Subscription{pick})
+		}
 	}
 }
 

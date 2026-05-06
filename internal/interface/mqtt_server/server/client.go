@@ -38,9 +38,13 @@ type Client struct {
 }
 
 // Subscription pairs a subscriber client with the maximum QoS it accepts.
+// Group is empty for regular pub/sub (broadcast) subscriptions; non-empty for
+// MQTT 5 shared subscriptions, where members of the same (Group, filter) bucket
+// compete for each message.
 type Subscription struct {
 	Client *Client
 	QoS    byte
+	Group  string
 }
 
 func newClient(conn net.Conn) *Client {

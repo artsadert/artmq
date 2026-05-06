@@ -180,19 +180,25 @@ func (b *Broker) handleSUBSCRIBE(c *Client, payload []byte) error {
 	}
 
 	b.mu.Lock()
-	for i, filter := range filters {
+	for i, raw := range filters {
 		qos := qosLevels[i]
+		group, filter, ok := parseSubscriptionFilter(raw)
+		if !ok {
+			// Malformed $share/... filter — surface as Topic Filter invalid.
+			qosLevels[i] = 0x8F
+			continue
+		}
 		subs := b.Subscriptions[filter]
 		replaced := false
 		for j, existing := range subs {
-			if existing.Client == c {
+			if existing.Client == c && existing.Group == group {
 				subs[j].QoS = qos
 				replaced = true
 				break
 			}
 		}
 		if !replaced {
-			subs = append(subs, Subscription{Client: c, QoS: qos})
+			subs = append(subs, Subscription{Client: c, QoS: qos, Group: group})
 		}
 		b.Subscriptions[filter] = subs
 
@@ -205,6 +211,29 @@ func (b *Broker) handleSUBSCRIBE(c *Client, payload []byte) error {
 
 	b.sendSUBACK(c, packetID, qosLevels)
 	return nil
+}
+
+// parseSubscriptionFilter splits an MQTT 5 shared-subscription filter into
+// (group, filter). For a regular topic filter, group is "" and filter is the
+// input unchanged. $share/<group>/<filter> → (<group>, <filter>).
+// Per spec §4.8.2, ShareName must be non-empty and must not contain '/', '+',
+// or '#'; the inner filter must be non-empty.
+func parseSubscriptionFilter(raw string) (group, filter string, ok bool) {
+	const prefix = "$share/"
+	if !strings.HasPrefix(raw, prefix) {
+		return "", raw, true
+	}
+	rest := raw[len(prefix):]
+	slash := strings.IndexByte(rest, '/')
+	if slash <= 0 {
+		return "", "", false
+	}
+	group = rest[:slash]
+	filter = rest[slash+1:]
+	if filter == "" || strings.ContainsAny(group, "+#") {
+		return "", "", false
+	}
+	return group, filter, true
 }
 
 // handlePUBLISH processes incoming PUBLISH at QoS 0/1/2.
