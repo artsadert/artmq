@@ -259,13 +259,16 @@ func (b *Broker) handlePUBLISH(c *Client, flags byte, payload []byte) error {
 		}
 	}
 
-	// MQTT 5 properties section
+	// MQTT 5 properties section — extract Message Expiry Interval (TTL) and
+	// any User Property "priority" (decimal int) used as message priority.
 	propLen, err := decodeVariableByteInteger(r)
 	if err != nil {
 		return err
 	}
+	var props publishProps
 	if propLen > 0 {
-		if _, err := io.CopyN(io.Discard, r, int64(propLen)); err != nil {
+		props, err = parsePublishProperties(r, propLen)
+		if err != nil {
 			return err
 		}
 	}
@@ -290,10 +293,16 @@ func (b *Broker) handlePUBLISH(c *Client, flags byte, payload []byte) error {
 		}
 	}
 
-	res := b.msgService.PushMessage(&command.PushMessageCommand{
+	pushCmd := &command.PushMessageCommand{
 		TopicName: topic,
 		Payload:   payloadBytes,
-	})
+		Priority:  props.Priority,
+	}
+	if props.MessageExpiryInterval != nil {
+		ttl := int64(*props.MessageExpiryInterval)
+		pushCmd.TTL = &ttl
+	}
+	res := b.msgService.PushMessage(pushCmd)
 
 	if res.Result.Error != "" {
 		return fmt.Errorf("failed to push message: %v", res.Result.Error)
