@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -14,7 +15,7 @@ import (
 )
 
 func (b *Broker) handleCONNECT(c *Client, payload []byte) error {
-	r := bufio.NewReader(strings.NewReader(string(payload)))
+	r := bufio.NewReader(bytes.NewReader(payload))
 	protoName, err := readUTF8String(r)
 	if err != nil || protoName != "MQTT" {
 		b.sendCONNACK(c, UnsupportedProtocolVersion)
@@ -105,9 +106,10 @@ func (b *Broker) removeClientSubsLocked(c *Client) {
 }
 
 func (b *Broker) sendCONNACK(c *Client, reasonCode byte) error {
-	remaining := 2
-	buf := []byte{byte(CONNACK << 4), byte(remaining)}
-	buf = append(buf, reasonCode, 0x00)
+	// MQTT 5 §3.2.2: variable header is
+	//   Connect Acknowledge Flags (1) | Reason Code (1) | Properties Length (varint) | Properties...
+	// We send no properties, so propLen=0 and remaining=3.
+	buf := []byte{byte(CONNACK << 4), 0x03, 0x00, reasonCode, 0x00}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	_, err := c.conn.Write(buf)
@@ -138,7 +140,7 @@ func (b *Broker) handleSUBSCRIBE(c *Client, payload []byte) error {
 	if len(payload) < 2 {
 		return errors.New("malformed SUBSCRIBE: too short")
 	}
-	r := bufio.NewReader(strings.NewReader(string(payload)))
+	r := bufio.NewReader(bytes.NewReader(payload))
 
 	var packetID uint16
 	if err := binary.Read(r, binary.BigEndian, &packetID); err != nil {
@@ -245,7 +247,7 @@ func (b *Broker) handlePUBLISH(c *Client, flags byte, payload []byte) error {
 	}
 	_ = retained
 
-	r := bufio.NewReader(strings.NewReader(string(payload)))
+	r := bufio.NewReader(bytes.NewReader(payload))
 
 	topic, err := readUTF8String(r)
 	if err != nil {

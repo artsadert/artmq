@@ -45,6 +45,12 @@ func (h *Handler) ListenAndServe() error {
 			log.Println(err)
 			continue
 		}
+		// Disable Nagle's algorithm: MQTT control packets are small and we
+		// don't gain anything from coalescing them in the kernel — it just
+		// adds 40ms tail latency on PUBACK/PUBREC/etc.
+		if tc, ok := conn.(*net.TCPConn); ok {
+			_ = tc.SetNoDelay(true)
+		}
 		go func() {
 			err := broker.HandleConnection(conn)
 			if err != nil {

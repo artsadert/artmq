@@ -28,5 +28,5 @@ COPY --from=builder /app/artmq .
 # Expose MQTT port (change if needed)
 EXPOSE 1883
 
-# Run
+# Run 
 CMD ["./artmq"]
